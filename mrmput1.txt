@@ -1,0 +1,19 @@
+#
+Queue=EX26in 
+#
+#
+QMgr=WMQI
+#
+# <Set>
+#
+MessageSetID=DRKUO4S072001
+#
+# <Type>
+#
+MessageID=m_Payment
+#
+# <Fmt>
+#
+MessageFormat=CWF
+#
+#

@@ -1,0 +1,360 @@
+
+ /********************************************************************/
+ /* MRMPUT1 -                                                        */
+ /*                                                                  */
+ /*   Put a message in 'legacy' format to a queue.                   */
+ /*                                                                  */
+ /*   Cliff Gardiner - Alphacourt Ltd.                               */
+ /*                                                                  */
+ /*   invokation: mrmput1 parameterfile                              */
+ /*                                                                  */
+ /*   Parameters are 1 Queue Name                                    */
+ /*                  2 Queue Manager Name                            */
+ /*                  3 Message Set ID (Set)                          */
+ /*                  4 Message ID (Type)                             */
+ /*                  5 Message Set CWF Format (Fmt)                  */
+ /*                                                                  */
+ /*   RFH2 Message Content Descriptor tags are in brackets.          */
+ /*                                                                  */
+ /********************************************************************/
+ MRMPUT1: Procedure(Parm) options (main, NOEXECOPS);
+
+ %include cmqp;
+ %include cmqepp;
+
+ Dcl   MQRCTXT  ext ('MQRCTXT')
+                      entry  (fixed bin(31) byvalue)
+                      returns(char(36) var)
+                      options(byvalue linkage(cdecl));
+
+ Dcl   SYSPRINT          EXT file print;
+                      /* parameter file and parm handling variables  */
+ Dcl   Parm              char(100) var;
+
+ Dcl 1 MsgDesc           like MQMD;
+ Dcl 1 ObjDesc           like MQOD;
+ Dcl 1 PutMsgOpts        like MQPMO;
+
+ Dcl  (ConnHdl,
+       QHdl,
+       OpenOptions,
+       CompCode,
+       ReasonCode)       fixed bin(31) static init(0);
+
+ Dcl   QMgr              char(MQ_Q_MGR_NAME_LENGTH);
+ Dcl   Q                 char(MQ_Q_NAME_LENGTH);
+
+ Dcl   ThisProg          char(9) value('MRMPUT1');
+ Dcl 1 Payment           based unal,
+       2 Customer_Number fixed bin(31),
+       2 Amount          fixed bin(31),
+       2 Discount_Code   fixed bin(15),
+       2 Sort_Code       pic '(6)9',
+       2 Account_Number  pic '(10)9',
+       2 Sales_Rep       char(40),
+       2 Comment         char(40);
+
+ Dcl   FB31Based         fixed bin(31) based;
+ Dcl   Char32760Based    char(32760) based;
+ Dcl   NameValueLength   fixed bin(31);
+                                  /* NameValueLength must be a        */
+                                  /* multiple of 4, like StrucLength  */
+ Dcl   NameValueData     char(NameValueLength) ctl;
+ Dcl   NameValueData1    char(24) static
+                         init('<mcd><Msd>MRM</Msd><Set>');
+ Dcl   MessageSetID      char(100) var;
+ Dcl   NameValueData2    char(12) static init('</Set><Type>');
+ Dcl   MessageID         char(100) var;
+ Dcl   NameValueData3    char(12) static init('</Type><Fmt>');
+ Dcl   MessageFormat     char(100) var;
+ Dcl   NameValueData4    char(12) static init('</Fmt></mcd>');
+
+ /*  NameValueData will end up looking something close to this.....
+ Dcl   NameValueData     char(92) static init('<mcd><Msd>MRM</Msd><Set>D
+ L795HO078001</Set><Type>PaymentMsg</Type><Fmt>CWF00002</Fmt></mcd>');*/
+
+ /*********************************************************************/
+ /*  Note: Msd  = Message Service Domain   = MRM NEON XML none        */
+ /*        Set  = * Message Set * IDENTIFIER                          */
+ /*        Type = * Message * IDENTIFIER                              */
+ /*        Fmt  = Message Format           = CWF IDENTIFIER or XML    */
+ /*********************************************************************/
+ /*  Message ID DL795HO070001 with CWF CWFtest0 is type PaymentMsg    */
+ /*  Message ID DL795HO078001 with CWF CWF00002 is type PaymentMsg    */
+ /*********************************************************************/
+
+ Dcl   Buffer            char(MQRFH_STRUC_LENGTH_FIXED_2
+                            + stg(Payment)
+                            + 1000);       /* should be big enough    */
+
+ Dcl   P                 Pointer;
+ Dcl   MsgLen            fixed bin(31);
+ Dcl   I                 fixed bin(31);
+
+ Dcl  (index,
+       verify,
+       substr,
+       addr,
+       trim)            builtin;
+
+    put skip list(Thisprog||DTStamp()||'MRMPUT1 starting...');
+
+    if ¬Valid_Parameters
+       then do;
+          put skip(2) list('ERROR - ');
+          put skip list('Required parameter is parameterfilename ');
+          return;
+       end;
+
+    call MQCONN(QMgr,
+                ConnHdl,
+                CompCode,
+                ReasonCode);
+
+    if ReasonCode ¬= MQRC_NONE
+       then do;
+          put skip list(Thisprog||DTStamp()||
+          'MQCONN failed with reason '||
+          MQRCTXT(ReasonCode));
+          return;
+       end;
+
+    ObjDesc.ObjectName = Q;
+    OpenOptions     = MQOO_OUTPUT
+                    + MQOO_FAIL_IF_QUIESCING;
+
+    call MQOPEN(ConnHdl,
+                ObjDesc,
+                OpenOptions,
+                QHdl,
+                CompCode,
+                ReasonCode);
+
+    if CompCode ¬= MQCC_OK
+       then do;
+          put skip list(Thisprog||DTStamp()||
+          'MQOPEN for '||Q||
+          ' failed with reason '||MQRCTXT(ReasonCode));
+          return;
+       end;
+
+    PutMsgOpts.Options      = MQPMO_SYNCPOINT
+                            + MQPMO_DEFAULT_CONTEXT
+                            + MQPMO_FAIL_IF_QUIESCING;
+
+    MsgDesc.Format   = MQFMT_RF_HEADER_2;
+    MsgDesc.MsgId    = MQMI_NONE;
+    MsgDesc.CorrelId = MQCI_NONE;
+
+    NameValueLength  = stg(NameValueData1)
+                     + length(MessageSetID)
+                     + stg(NameValueData2)
+                     + length(MessageID)
+                     + stg(NameValueData3)
+                     + length(MessageFormat)
+                     + stg(NameValueData4);
+
+    I = NameValueLength / 4;   /* NValueLength must be multiple of 4  */
+    if (I * 4) < NameValueLength
+       then I += 1;
+
+    NameValueLength = I * 4;
+
+    allocate NameValueData;
+
+    NameValueData =  NameValueData1
+                  || MessageSetID
+                  || NameValueData2
+                  || MessageID
+                  || NameValueData3
+                  || MessageFormat
+                  || NameValueData4;
+
+    P = addr(Buffer);
+                               /* First we set up the MQRFH2 header.*/
+    P -> MQRFH2.StrucID         = MQRFH_STRUC_ID;
+    P -> MQRFH2.Version         = MQRFH_VERSION_2;
+
+                               /* StrucLength must be a multiple of 4*/
+    I = (MQRFH_STRUC_LENGTH_FIXED_2
+         + stg(NameValueLength)
+         +     NameValueLength) / 4;
+
+    if (I * 4) <  (MQRFH_STRUC_LENGTH_FIXED_2
+                   + stg(NameValueLength)
+                   +     NameValueLength)
+       then I += 1;
+
+    P -> MQRFH2.StrucLength,
+         MsgLen = I * 4;
+
+    P -> MQRFH2.Encoding        = MQENC_NATIVE;
+    P -> MQRFH2.CodedCharSetId  = MQCCSI_INHERIT;
+    P -> MQRFH2.Format          = MQFMT_STRING;
+    P -> MQRFH2.Flags           = MQRFH_NONE;
+    P -> MQRFH2.NameValueCCSID  = 1208;
+
+    P += stg(MQRFH2);
+    P -> FB31Based              = NameValueLength;
+
+    P += stg(NameValueLength);
+    substr(P -> Char32760Based,1,NameValueLength) = NameValueData;
+
+    P += NameValueLength;
+    P -> Payment.Customer_Number = 942687;
+    p -> Payment.Amount          = 45000;
+    P -> Payment.Discount_Code   = 123;
+    P -> Payment.Sort_Code       = 205478;
+    p -> Payment.Account_Number  = 12345678;
+    P -> Sales_Rep        = 'John Davenport';
+    P -> Comment          = 'Account changing next month';
+
+    put skip list('NameValueData is '||NameValueData);
+
+    free NameValueData;
+
+    MsgLen += stg(Payment);
+
+    call MQPUT(ConnHdl,
+               QHdl,
+               MsgDesc,
+               PutMsgOpts,
+               MsgLen,
+               Buffer,
+               CompCode,
+               ReasonCode);
+
+    if CompCode ¬= MQCC_OK
+       then do;
+          put skip list(Thisprog||DTStamp()||
+          'MQPUT for '||trim(Q)||
+          ' failed with reason '||MQRCTXT(ReasonCode));
+
+          call MQBACK(ConnHdl,
+                      CompCode,
+                      ReasonCode);
+          return;
+       end;
+
+    call MQCMIT(ConnHdl,
+                CompCode,
+                ReasonCode);
+
+    if CompCode ¬= MQCC_OK
+       then do;
+          put skip list(Thisprog||DTStamp()||
+          'MQCMIT failed with reason '||MQRCTXT(ReasonCode));
+          return;
+       end;
+
+    call MQDISC(ConnHdl,
+                CompCode,
+                ReasonCode);
+
+    if ReasonCode ¬= MQRC_NONE
+       then do;
+          put skip list(Thisprog||DTStamp()||
+          'MDISC failed with reason '||
+          MQRCTXT(ReasonCode));
+          return;
+       end;
+
+    put skip list(Thisprog||DTStamp()||'MRMPUT1 ending OK.');
+
+1/********************************************************************/
+ /* DTStamp                                                          */
+ /*                                                                  */
+ /*  Return a formatted date & time stamp.                           */
+ /********************************************************************/
+ DTStamp:proc returns(char(24));
+
+ Dcl  Datetime          builtin;
+
+ Dcl  DTString          char(17) static;
+ Dcl 1 Now              based(addr(DTString)),
+       2 YY             char(2),
+       2 CC             char(2),
+       2 MM             char(2),
+       2 DD             char(2),
+       2 Hr             char(2),
+       2 Min            char(2),
+       2 Sec            char(2),
+       2 Millisec       char(3);
+
+    DTString = Datetime();
+    return(Now.DD||'-'||Now.MM||'-'||Now.YY||Now.CC||' '||
+           Now.Hr||':'||Now.Min||':'||Now.Sec||':'||Now.Millisec||' ');
+
+ end;                   /* end of DTStamp                            */
+1/********************************************************************/
+ /* Valid_Parameters                                                 */
+ /*                                                                  */
+ /********************************************************************/
+ Valid_Parameters:proc returns(bit(1));
+
+ Dcl Infile     file record seql input;
+ Dcl EofInfile  bit(1) static init('0'b);
+
+ on endfile(Infile) EofInfile = '1'b;
+
+ Dcl Inrec      char(120) var;
+ Dcl ParamFile  char(100) var;
+ Dcl I          fixed bin(15);
+ Dcl OK         bit(1) static init('1'b);
+ Dcl IOerror    bit(1) static init('0'b);
+
+    on UndefinedFile(Infile) begin;
+       Put skip list('Unable to open parameter file '''||
+       ParamFile||'''.  Ensure the filename and path is valid.');
+       IOerror = '1'b;
+    end;
+
+    put skip list('Parameter file is '||Parm);
+
+    ParamFile = trim(Parm);
+
+    open file(Infile) title("/"||ParamFile);
+    if IOerror
+       then return(¬OK);
+    read file(Infile) into(Inrec);
+
+    Do while (¬EofInfile);
+       Inrec = trim(Inrec);
+
+       if (substr(Inrec,1,1) = '#')     /* ignore comment and blank  */
+        | (length(Inrec) = 0)           /* lines                     */
+          then go to next_rec;          /* expeditious...            */
+       put skip list(Inrec);
+
+       select;
+          when(index(Inrec,'Queue=') > 0)
+             Q = trim(substr(Inrec,7));
+          when(index(Inrec,'QMgr=') > 0)
+             QMgr = trim(substr(Inrec,6));
+          when(index(Inrec,'MessageSetID=') > 0)
+             MessageSetID = trim(substr(Inrec,14));
+          when(index(Inrec,'MessageID=') > 0)
+             MessageID = trim(substr(Inrec,11));
+          when(index(Inrec,'MessageFormat=') > 0)
+             MessageFormat = trim(substr(Inrec,15));
+          other
+             OK = '0'b;
+       end;
+
+ next_rec:
+       read file(Infile) into(Inrec);
+    end;
+
+    close file(Infile);
+
+    put skip list('Parameters are:');
+    put skip(2) list('Queue manager        is '||Qmgr);
+    put skip list('Output queue         is '||Q);
+    put skip list('MessageSetID  <Set>  is '||MessageSetID);
+    put skip list('MessageID     <Type> is '||MessageID);
+    put skip list('MessageFormat <Fmt>  is '||MessageFormat);
+
+    return(OK);
+ end;                   /* end of Valid_Parameters                  */
+
+ End;                   /* end of MRMPUT1                           */

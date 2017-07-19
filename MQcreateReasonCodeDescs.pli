@@ -1,0 +1,181 @@
+1/********************************************************************/
+ /* MQCreateReasonCodeDescs -                                        */
+ /*   Parse the CMQP include member and generate program code to be  */
+ /*   compiled and linked into MQRCtext.dll                          */
+ /********************************************************************/
+ MQCreateReasonCodeDescs: Procedure options (main);
+
+ Dcl   CMQP             file record seql input;
+ Dcl   PLI              file record seql output;
+ Dcl  (Inrec,
+       Outrec)          char(120) var;
+ Dcl   SYSPRINT         EXT file print;
+ Dcl   (I,
+        J,
+        StartPos,
+        TextLen)        fixed bin(31);
+ Dcl  (BinNumber,
+       MaxBin)          fixed bin(15);
+ Dcl 1 MessageArray(I)  ctl,
+       2 Number         pic'zzz9',
+       2 Text           char(30);
+ Dcl   CharNumber       char(4) based;
+ Dcl   EofCMQP          bit(1) static init('0'b);
+ Dcl  (index,
+       substr,
+       addr,
+       right)            builtin;
+
+    On endfile(CMQP) EofCMQP = '1'b;
+
+ /* %include Errblock1;    */
+
+    Open file(CMQP)
+       title('/C:\Progra~1\MQSeries\tools\pli\include\cmqp.inc');
+
+                        /* we must start by determining the number of*/
+                        /* codes there are                           */
+
+    I = 0;
+    Read file(CMQP) into(Inrec);
+    Do while(¬EofCMQP);
+       if index(Inrec,'%MQRC_') ¬= 0
+          then I += 1;
+       Read file(CMQP) into(Inrec);
+    end;
+    Close file(CMQP);
+    EofCMQP = '0'b;
+
+    Open file(CMQP)
+       title('/C:\Progra~1\MQSeries\tools\pli\include\cmqp.inc');
+
+                        /* now allocate the array with the correct   */
+                        /* size to hold all the codes and their      */
+                        /* associated text                           */
+    allocate MessageArray;
+
+    J,MaxBin = 0;
+    Read file(CMQP) into(Inrec);
+
+    Do while(¬EofCMQP);
+       if index(Inrec,'%MQRC_') ¬= 0
+          then do;
+             J += 1;
+             StartPos = index(Inrec,'%MQRC_') + 6;
+             TextLen  = index(substr(Inrec,StartPos),' ') - 1;
+             MessageArray(J).Text = substr(Inrec,StartPos,TextLen);
+
+             StartPos = index(Inrec,'''') + 1;
+             TextLen  = index(substr(Inrec,StartPos),'''') - 1;
+             addr(MessageArray(J).Number) -> CharNumber =
+                right(substr(Inrec,StartPos,TextLen),4);
+
+             BinNumber = MessageArray(J).Number;
+             If BinNumber > MaxBin
+                then MaxBin = BinNumber;
+          end;
+       Read file(CMQP) into(Inrec);
+    end;
+
+    MaxNumber = MaxBin;
+    Close file(CMQP);
+
+                        /* now generate the code to produce          */
+                        /* MQRCtext.dll                              */
+
+    Open file(PLI) title('/C:\Source~1\PLI\MQRCtext.pli');
+
+    call OutputSource
+      ('*process LIMITS(EXTNAME(31)) dllinit libs(single);');
+    call OutputSource
+      (' /*********************************************************/');
+    call OutputSource
+      (' /*  MQRCtext -                                           */');
+    call OutputSource
+      (' /*     returns a descriptive reason from a numeric MQRC  */');
+    call OutputSource
+      (' /*     reason code.                                      */');
+    call OutputSource
+      (' /*********************************************************/');
+    call OutputSource
+      (' MQRCtext:package Exports(*);');
+    call OutputSource
+      (' MQRCTXT:proc(RC) returns(char(36) var)');
+    call OutputSource
+      ('         options(byvalue linkage(cdecl));');
+    call OutputSource
+      (' ');
+    call OutputSource
+      (' Dcl   SYSPRINT      ext file print;');
+    call OutputSource
+      (' Dcl   RC            fixed bin(31);');
+    call OutputSource
+      (' Dcl   PicReason     pic''zz9999'';');
+    call OutputSource
+      (' Dcl  (Trim, Lbound, Hbound)          builtin;');
+    call OutputSource
+      (' Dcl   FirstTimeThru bit(1) static init(''1''b);');
+    call OutputSource
+      (' ');
+    call OutputSource
+      (' Dcl   TextArray(0:'||MaxNumber||')        char(30)');
+
+    MaxNumber += 1;
+
+
+    call OutputSource
+      ('        static init(('||MaxNumber||
+                ')(1) ''Unknown Reason Code'');');
+
+    MaxNumber -= 1;
+
+    call OutputSource
+      (' ');
+
+    call OutputSource
+      ('    If FirstTimeThru');
+    call OutputSource
+      ('       then do;');
+
+    Do J = 1 to I;
+       call OutputSource
+         ('          TextArray('||
+          addr(MessageArray(J).Number) -> CharNumber||') = '''||
+          MessageArray(J).Text||''';');
+    end;
+
+    call OutputSource
+      ('          FirstTimeThru = ''0''b;');
+    call OutputSource
+      ('       end;');
+    call OutputSource
+      ('    PicReason = RC;');
+    call OutputSource
+      ('    If (RC > Hbound(TextArray,1)) | ');
+    call OutputSource
+      ('       (RC < Lbound(TextArray,1))');
+    call OutputSource
+      ('       then return(''Reason Code ''||PicReason||');
+    call OutputSource
+      ('            '' out of range.'');');
+    call OutputSource
+      ('    Return(PicReason||'': ''||trim(TextArray(RC)));');
+    call OutputSource
+      (' End;');
+
+    Close file(PLI);
+    Free MessageArray;
+
+1/********************************************************************/
+ /* Procedure OutputSource                                           */
+ /*    output a 'line of code' to the PL/1 source output file        */
+ /********************************************************************/
+ OutputSource:proc(PLIsource);
+
+ Dcl   PLIsource    char(120) var;
+
+    write file(PLI) from(PLIsource);
+
+ end;                   /* end of OututSource                        */
+
+ End;                   /* end of MQCreateReasonCodeDescs            */
